@@ -1,0 +1,27 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Each user can only see and change their own tasks.
+    match /users/{userId}/tasks/{taskId} {
+      function isOwner() {
+        return request.auth != null && request.auth.uid == userId;
+      }
+      function validTask() {
+        let d = request.resource.data;
+        return d.title is string && d.title.size() > 0 && d.title.size() <= 200
+          && d.status in ['todo', 'doing', 'done']
+          && d.priority in ['low', 'med', 'high']
+          && d.progress is number && d.progress >= 0 && d.progress <= 100;
+      }
+
+      allow read, delete: if isOwner();
+      allow create, update: if isOwner() && validTask();
+    }
+
+    // Everything else is locked.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
