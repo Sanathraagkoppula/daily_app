@@ -177,6 +177,22 @@ main{padding:16px 16px calc(100px + env(safe-area-inset-bottom));max-width:860px
 .sheet-actions{display:flex;gap:8px;align-items:center;padding-top:4px}
 .toast{position:fixed;left:50%;bottom:calc(150px + env(safe-area-inset-bottom));transform:translateX(-50%);background:var(--text);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:14px;font-weight:500;z-index:60;max-width:calc(100% - 32px);box-shadow:var(--shadow)}
 @media (min-width:900px){.toast{bottom:28px}}
+
+/* ---------- google calendar ---------- */
+.check-row{display:flex;align-items:center;gap:10px;background:var(--surface-2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-size:14px;color:var(--text);font-weight:500;cursor:pointer}
+.check-row input{width:18px;height:18px;padding:0;margin:0;flex:none;accent-color:var(--accent);box-shadow:none;cursor:pointer}
+.check-row .note{color:var(--muted);font-size:12px;font-weight:500}
+.check-row a{margin-left:auto;font-size:13px;font-weight:600;text-decoration:none;white-space:nowrap}
+.gcal-hint{display:flex;align-items:center;justify-content:space-between;gap:10px;background:var(--surface);border:1px dashed var(--border);border-radius:var(--radius);padding:10px 14px;font-size:14px;color:var(--muted)}
+.gcal-hint .btn{padding:7px 12px}
+.sec-btn{margin-left:auto;border:0;background:none;color:var(--accent);font-weight:600;font-size:13px;cursor:pointer;padding:2px 4px}
+.event{text-decoration:none;color:inherit;align-items:center}
+.event .ev-time{flex:none;min-width:66px;font-size:12px;font-weight:700;color:var(--accent);line-height:1.35}
+.event .ev-time span{color:var(--muted);font-weight:500}
+.event.past{opacity:.55}
+.event.now{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+.event .now-tag{font-size:11px;font-weight:700;color:var(--on-accent);background:var(--accent);border-radius:99px;padding:1px 8px}
+.ev-note{font-size:13px;color:var(--muted);padding:10px 14px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);display:flex;align-items:center;gap:10px;justify-content:space-between}
 </style>
 </head>
 <body>
@@ -244,6 +260,10 @@ main{padding:16px 16px calc(100px + env(safe-area-inset-bottom));max-width:860px
       <button class="avatar" id="avatarBtn" type="button" aria-label="Account"></button>
       <div class="menu" id="userMenu" hidden>
         <div class="email" id="menuEmail"></div>
+        <button type="button" id="gcalConnectBtn">📅 Connect Google Calendar</button>
+        <button type="button" id="gcalSyncBtn" hidden>🔄 Add upcoming tasks to Calendar</button>
+        <button type="button" id="gcalAutoBtn" hidden>Auto-add new tasks: On</button>
+        <button type="button" id="gcalDisconnectBtn" hidden>Disconnect Google Calendar</button>
         <button type="button" id="signOutBtn">Sign out</button>
         <button type="button" id="resetCfgBtn" hidden>Change Firebase project</button>
       </div>
@@ -263,10 +283,16 @@ main{padding:16px 16px calc(100px + env(safe-area-inset-bottom));max-width:860px
     </div>
     <label>Title<input name="title" required maxlength="200" placeholder="What needs doing?"></label>
     <label>Details<textarea name="notes" rows="3" maxlength="4000" placeholder="Notes, links, acceptance criteria…"></textarea></label>
+    <label>Project<input name="project" list="projects" maxlength="60" placeholder="e.g. College"></label>
     <div class="row">
-      <label>Project<input name="project" list="projects" maxlength="60" placeholder="e.g. College"></label>
       <label>Due date<input type="date" name="dueDate"></label>
+      <label>Time (optional)<input type="time" name="dueTime"></label>
     </div>
+    <label class="check-row" id="gcalRow" hidden>
+      <input type="checkbox" name="gcal">
+      <span>📅 Show in Google Calendar <span class="note" id="gcalNote"></span></span>
+      <a id="gcalLink" href="#" target="_blank" rel="noopener" hidden>Open ↗</a>
+    </label>
     <div class="row">
       <label>Priority
         <select name="priority"><option value="high">High</option><option value="med">Medium</option><option value="low">Low</option></select>
@@ -302,15 +328,21 @@ main{padding:16px 16px calc(100px + env(safe-area-inset-bottom));max-width:860px
    1. FIREBASE CONFIG — paste yours here (or use the setup screen)
    ========================================================= */
 const FIREBASE_CONFIG = {
-  apiKey: "",
-  authDomain: "",
-  projectId: "",
-  storageBucket: "",
-  messagingSenderId: "",
-  appId: ""
+  apiKey: "AIzaSyCBOg1GwzgFOnFxyF5aNmkPtZJvjaCrLAU",
+  authDomain: "dailyproject-bc0be.firebaseapp.com",
+  projectId: "dailyproject-bc0be",
+  storageBucket: "dailyproject-bc0be.firebasestorage.app",
+  messagingSenderId: "30844326260",
+  appId: "1:30844326260:web:f88b5df9cadc3a9b44dc21",
+  measurementId: "G-BF1VPKECYK"
 };
 const SDK = "https://www.gstatic.com/firebasejs/10.12.2";
 const CFG_KEY = "dt_firebase_config";
+
+/* Google Calendar — OAuth Web client from Google Cloud → Google Auth Platform → Clients */
+const GCAL_CLIENT_ID = "30844326260-esjsfllp8c84cokonsuv9vul1helpfu8.apps.googleusercontent.com";
+const GCAL_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+const GCAL_API = "https://www.googleapis.com/calendar/v3/calendars/primary/events";
 
 /* =========================================================
    2. HELPERS
@@ -356,6 +388,11 @@ function fmtWhen(msv) {
   return `${d.toLocaleDateString(undefined, { month:"short", day:"numeric" })}, ${time}`;
 }
 
+function fmtTime(hhmm) {
+  const [h, m] = hhmm.split(":").map(Number);
+  return new Date(2000, 0, 1, h, m).toLocaleTimeString(undefined, { hour:"numeric", minute:"2-digit" });
+}
+
 function dayLabel(key) {
   const t = dayKey();
   if (key === t) return "Today";
@@ -374,7 +411,7 @@ function parseConfig(text) {
 }
 
 function loadConfig() {
-  if (!FIREBASE_CONFIG.apiKey.startsWith("YOUR_")) return { cfg: FIREBASE_CONFIG, stored: false };
+  if (FIREBASE_CONFIG.apiKey && !FIREBASE_CONFIG.apiKey.startsWith("YOUR_")) return { cfg: FIREBASE_CONFIG, stored: false };
   try {
     const s = localStorage.getItem(CFG_KEY);
     if (s) return { cfg: JSON.parse(s), stored: true };
@@ -430,11 +467,13 @@ async function boot() {
     if (user) {
       state.tasks = [];
       state.renderedView = null;
+      gcalInit();
       renderUser();
       show("app");
       subscribe();
       render();
     } else {
+      gcalReset();
       show("auth");
     }
   });
@@ -558,6 +597,359 @@ addEventListener("offline", updateOnline);
 updateOnline();
 
 /* =========================================================
+   6b. GOOGLE CALENDAR
+   - Sign-in uses Google Identity Services (popup, 1-hour token)
+   - Tasks with a due date + "Show in Google Calendar" become events
+     in your primary calendar (tagged with the task id)
+   - Today view shows today's other calendar events as a schedule
+   ========================================================= */
+const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const gcal = {
+  client: null, token: null, exp: 0, connected: false, auto: true,
+  events: null, day: null, status: "idle", err: "", waiters: []
+};
+let gisPromise = null;
+
+const gcalKey = () => `dt_gcal_${state.user.uid}`;
+
+function gcalSave() {
+  try {
+    localStorage.setItem(gcalKey(), JSON.stringify({
+      connected: gcal.connected, token: gcal.token, exp: gcal.exp, auto: gcal.auto
+    }));
+  } catch {}
+}
+
+function gcalReset() {
+  Object.assign(gcal, { token: null, exp: 0, connected: false, auto: true, events: null, day: null, status: "idle", err: "" });
+}
+
+function gcalInit() {
+  gcalReset();
+  try {
+    const s = JSON.parse(localStorage.getItem(gcalKey()) || "null");
+    if (s) Object.assign(gcal, { connected: !!s.connected, token: s.token || null, exp: s.exp || 0, auto: s.auto !== false });
+  } catch {}
+  renderGcalMenu();
+  loadGis().catch(() => {});
+  if (gcal.connected) gcalLoadToday(false);
+}
+
+function loadGis() {
+  if (window.google?.accounts?.oauth2) return Promise.resolve();
+  return gisPromise ||= new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = "https://accounts.google.com/gsi/client";
+    s.async = true;
+    s.onload = res;
+    s.onerror = () => { gisPromise = null; rej(new Error("Couldn't load Google sign-in. Check your connection.")); };
+    document.head.appendChild(s);
+  });
+}
+
+function gcalErr(type, message) {
+  const e = new Error(message || type);
+  e.type = type;
+  return e;
+}
+
+function gcalFlush(err, token) {
+  const w = gcal.waiters.splice(0);
+  w.forEach(x => err ? x.rej(err) : x.res(token));
+}
+
+function gcalClient() {
+  return gcal.client ||= google.accounts.oauth2.initTokenClient({
+    client_id: GCAL_CLIENT_ID,
+    scope: GCAL_SCOPE,
+    callback: r => {
+      if (r.error) { gcalFlush(gcalErr(r.error, r.error_description)); return; }
+      if (!google.accounts.oauth2.hasGrantedAllScopes(r, GCAL_SCOPE)) { gcalFlush(gcalErr("scope")); return; }
+      gcal.token = r.access_token;
+      gcal.exp = Date.now() + (Number(r.expires_in || 3600) - 60) * 1000;
+      gcal.connected = true;
+      gcalSave();
+      gcalFlush(null, gcal.token);
+    },
+    error_callback: e => gcalFlush(gcalErr(e.type || "popup_closed", e.message))
+  });
+}
+
+/* Must be called synchronously inside a click/submit when a popup may be needed */
+function gcalToken(interactive = true) {
+  if (gcal.token && Date.now() < gcal.exp) return Promise.resolve(gcal.token);
+  if (!interactive) return Promise.reject(gcalErr("expired"));
+  return new Promise((res, rej) => {
+    gcal.waiters.push({ res, rej });
+    if (gcal.waiters.length > 1) return;
+    const go = () => {
+      try {
+        gcalClient().requestAccessToken({
+          prompt: gcal.connected ? "" : "consent",
+          login_hint: state.user?.email || undefined
+        });
+      } catch (e) { gcalFlush(e); }
+    };
+    if (window.google?.accounts?.oauth2) go();
+    else loadGis().then(go, e => gcalFlush(e));
+  });
+}
+
+async function gcalApi(method, path = "", body = null, interactive = true) {
+  const token = await gcalToken(interactive);
+  const r = await fetch(GCAL_API + path, {
+    method,
+    headers: { Authorization: `Bearer ${token}`, ...(body ? { "Content-Type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if (r.status === 401) {
+    gcal.token = null; gcal.exp = 0; gcalSave();
+    throw gcalErr("expired");
+  }
+  if (r.status === 204) return null;
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const e = gcalErr("api", data.error?.message || `Calendar error ${r.status}`);
+    e.status = r.status;
+    throw e;
+  }
+  return data;
+}
+
+function gcalMsg(e) {
+  const t = e?.type || "";
+  if (t === "popup_failed_to_open") return "Pop-up blocked. Allow pop-ups for this site, then try again.";
+  if (t === "popup_closed") return "Google Calendar sign-in was closed.";
+  if (t === "access_denied") return "Calendar access wasn't granted.";
+  if (t === "scope") return "Tick the Google Calendar permission box to connect.";
+  if (t === "expired") return "Calendar session expired. Tap Refresh on the Today screen.";
+  return "Google Calendar: " + (e?.message || "something went wrong");
+}
+
+const gone = e => e?.status === 404 || e?.status === 410;
+const enc = encodeURIComponent;
+
+function localIso(d) {
+  return `${dayKey(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}:00`;
+}
+
+function gcalEventBody(t) {
+  const done = t.status === "done";
+  const priName = { high: "High", med: "Medium", low: "Low" }[t.priority] || "Medium";
+  const description = [
+    t.notes,
+    t.project ? `Project: ${t.project}` : "",
+    `Priority: ${priName}`,
+    done ? "Status: Completed ✅" : t.status === "doing" ? `Status: In progress (${t.progress || 0}%)` : "Status: To do",
+    "— Added from Daily Tracker"
+  ].filter(Boolean).join("\n");
+
+  const ev = {
+    summary: (done ? "✅ " : "") + t.title,
+    description,
+    status: "confirmed",
+    transparency: "transparent",
+    reminders: { useDefault: true },
+    extendedProperties: { private: { dtTaskId: t.id } }
+  };
+  if (done) ev.colorId = "2";
+  else if (t.priority === "high") ev.colorId = "11";
+
+  if (t.dueTime) {
+    const [h, m] = t.dueTime.split(":").map(Number);
+    const start = keyToDate(t.dueDate);
+    start.setHours(h, m, 0, 0);
+    const end = new Date(start.getTime() + 30 * 60e3);
+    ev.start = { dateTime: localIso(start), timeZone: TZ };
+    ev.end = { dateTime: localIso(end), timeZone: TZ };
+  } else {
+    ev.start = { date: t.dueDate };
+    ev.end = { date: addDays(t.dueDate, 1) };
+  }
+  return ev;
+}
+
+/* Create / update / remove the calendar event for one task. Returns true on success. */
+async function gcalSync(t, quiet = false) {
+  if (!gcal.connected) return false;
+  const want = t.gcal && t.dueDate;
+  if (!want && !t.gcalEventId) return false;
+  try {
+    if (!want) {
+      await gcalApi("DELETE", `/${enc(t.gcalEventId)}`).catch(e => { if (!gone(e)) throw e; });
+      fb.updateDoc(taskRef(t.id), { gcalEventId: null, gcalLink: null }).catch(fail);
+      if (!quiet) toast("Removed from Google Calendar");
+      return true;
+    }
+    const body = gcalEventBody(t);
+    let ev = null;
+    if (t.gcalEventId) {
+      ev = await gcalApi("PUT", `/${enc(t.gcalEventId)}`, body).catch(e => { if (!gone(e)) throw e; return null; });
+    }
+    const isNew = !ev;
+    if (!ev) ev = await gcalApi("POST", "", body);
+    if (ev.id !== t.gcalEventId || ev.htmlLink !== t.gcalLink) {
+      fb.updateDoc(taskRef(t.id), { gcalEventId: ev.id, gcalLink: ev.htmlLink || null }).catch(fail);
+    }
+    if (isNew && !quiet) toast("Added to Google Calendar 📅");
+    return true;
+  } catch (e) {
+    console.error(e);
+    toast(gcalMsg(e));
+    return false;
+  }
+}
+
+function gcalRemove(t) {
+  if (!gcal.connected || !t?.gcalEventId) return;
+  gcalApi("DELETE", `/${enc(t.gcalEventId)}`).catch(e => { if (!gone(e)) { console.error(e); toast(gcalMsg(e)); } });
+}
+
+async function gcalLoadToday(interactive = false) {
+  if (!gcal.connected) return;
+  const day = dayKey();
+  if (!gcal.events || gcal.day !== day) { gcal.status = "loading"; render(); }
+  try {
+    const q = new URLSearchParams({
+      timeMin: keyToDate(day).toISOString(),
+      timeMax: keyToDate(addDays(day, 1)).toISOString(),
+      singleEvents: "true",
+      orderBy: "startTime",
+      maxResults: "50"
+    });
+    const data = await gcalApi("GET", "?" + q, null, interactive);
+    gcal.events = (data.items || []).filter(e => e.status !== "cancelled" && !e.extendedProperties?.private?.dtTaskId);
+    gcal.day = day;
+    gcal.status = "ok";
+    gcal.err = "";
+  } catch (e) {
+    console.error(e);
+    gcal.status = e.type === "expired" ? "expired" : "error";
+    gcal.err = gcalMsg(e);
+  }
+  render();
+}
+
+async function gcalConnect() {
+  try {
+    const p = gcalToken(true);
+    await p;
+    toast("Google Calendar connected ✓");
+    renderGcalMenu();
+    gcalLoadToday(false);
+    if (!$("#sheet").hidden) syncSheetGcal();
+  } catch (e) {
+    console.error(e);
+    toast(gcalMsg(e));
+  }
+}
+
+function gcalDisconnect() {
+  if (!confirm("Disconnect Google Calendar on this device?\nEvents already added stay in your calendar.")) return;
+  if (gcal.token && window.google?.accounts?.oauth2) google.accounts.oauth2.revoke(gcal.token, () => {});
+  gcalReset();
+  try { localStorage.removeItem(gcalKey()); } catch {}
+  renderGcalMenu();
+  render();
+  toast("Google Calendar disconnected");
+}
+
+async function gcalSyncAll() {
+  const t0 = dayKey();
+  const list = state.tasks.filter(t => t.status !== "done" && t.dueDate && t.dueDate >= t0 && !t.gcalEventId);
+  if (!list.length) { toast("All upcoming tasks are already in your calendar"); return; }
+  try { await gcalToken(true); } catch (e) { toast(gcalMsg(e)); return; }
+  toast(`Adding ${list.length} task${list.length === 1 ? "" : "s"}…`);
+  let n = 0;
+  for (const t of list) {
+    fb.updateDoc(taskRef(t.id), { gcal: true }).catch(fail);
+    if (await gcalSync({ ...t, gcal: true }, true)) n++;
+  }
+  toast(`Added ${n} task${n === 1 ? "" : "s"} to Google Calendar 📅`);
+}
+
+function renderGcalMenu() {
+  const c = gcal.connected;
+  $("#gcalConnectBtn").hidden = c;
+  $("#gcalSyncBtn").hidden = !c;
+  $("#gcalAutoBtn").hidden = !c;
+  $("#gcalDisconnectBtn").hidden = !c;
+  $("#gcalAutoBtn").textContent = `Auto-add new tasks to Calendar: ${gcal.auto ? "On" : "Off"}`;
+}
+
+$("#gcalConnectBtn").addEventListener("click", () => { $("#userMenu").hidden = true; gcalConnect(); });
+$("#gcalSyncBtn").addEventListener("click", () => { $("#userMenu").hidden = true; gcalSyncAll(); });
+$("#gcalDisconnectBtn").addEventListener("click", () => { $("#userMenu").hidden = true; gcalDisconnect(); });
+$("#gcalAutoBtn").addEventListener("click", () => {
+  gcal.auto = !gcal.auto;
+  gcalSave();
+  renderGcalMenu();
+  toast(gcal.auto ? "New tasks with a due date will be added to Calendar" : "New tasks won't be added automatically");
+});
+
+function evTime(ev) {
+  if (ev.start?.date) return "All day";
+  const s = new Date(ev.start.dateTime), en = new Date(ev.end.dateTime);
+  const f = d => d.toLocaleTimeString(undefined, { hour:"numeric", minute:"2-digit" });
+  if (dayKey(s) !== dayKey()) return `Until<br><span>${f(en)}</span>`;
+  return `${f(s)}<br><span>${f(en)}</span>`;
+}
+
+function scheduleHtml() {
+  if (!gcal.connected) {
+    return `<div class="gcal-hint"><span>📅 See today's Google Calendar here</span><button class="btn" type="button" data-gcal="connect">Connect</button></div>`;
+  }
+  const evs = gcal.status === "ok" ? gcal.events || [] : [];
+  const head = `<div class="section"><h2>Schedule</h2>${evs.length ? `<span class="count">${evs.length}</span>` : ""}
+    <button class="sec-btn" type="button" data-gcal="refresh">↻ Refresh</button></div>`;
+
+  if (gcal.status === "loading") return head + `<div class="ev-note">Loading today's events…</div>`;
+  if (gcal.status === "expired") return head + `<div class="ev-note"><span>Calendar session expired.</span><button class="btn" type="button" data-gcal="refresh">Refresh</button></div>`;
+  if (gcal.status === "error") return head + `<div class="ev-note"><span>${esc(gcal.err)}</span><button class="btn" type="button" data-gcal="refresh">Retry</button></div>`;
+  if (!evs.length) return head + `<div class="ev-note">No events on your calendar today.</div>`;
+
+  const now = Date.now();
+  const items = evs.map(ev => {
+    const allDay = !!ev.start?.date;
+    const s = allDay ? 0 : new Date(ev.start.dateTime).getTime();
+    const e = allDay ? 0 : new Date(ev.end.dateTime).getTime();
+    const cls = allDay ? "" : e < now ? "past" : s <= now ? "now" : "";
+    const meta = [
+      cls === "now" ? `<span class="now-tag">Now</span>` : "",
+      ev.location ? `<span>📍 ${esc(ev.location)}</span>` : "",
+      ev.hangoutLink ? `<span>🎥 Meet</span>` : ""
+    ].filter(Boolean).join("");
+    return `<li><a class="card event ${cls}" href="${esc(ev.htmlLink || "#")}" target="_blank" rel="noopener">
+      <span class="ev-time">${evTime(ev)}</span>
+      <div class="card-body">
+        <div class="card-title">${esc(ev.summary || "(No title)")}</div>
+        ${meta ? `<div class="meta">${meta}</div>` : ""}
+      </div>
+    </a></li>`;
+  }).join("");
+  return head + `<ul class="list">${items}</ul>`;
+}
+
+/* Sheet: calendar checkbox + note */
+function syncSheetGcal(task) {
+  const t = task ?? state.tasks.find(x => x.id === state.editing);
+  $("#gcalRow").hidden = !gcal.connected;
+  const link = $("#gcalLink");
+  link.hidden = !t?.gcalLink;
+  if (t?.gcalLink) link.href = t.gcalLink;
+  updateGcalNote();
+}
+
+function updateGcalNote() {
+  const noDate = !F["dueDate"].value;
+  $("#gcalNote").textContent = noDate && F["gcal"].checked ? "· needs a due date" : "";
+}
+
+setInterval(() => {
+  if (state.user && gcal.connected && !document.hidden && state.view === "today") gcalLoadToday(false);
+}, 5 * 60e3);
+
+/* =========================================================
    7. DERIVED DATA
    ========================================================= */
 function sortOpen(a, b) {
@@ -566,6 +958,7 @@ function sortOpen(a, b) {
   const p = (PRI[a.priority] ?? 1) - (PRI[b.priority] ?? 1);
   if (p) return p;
   if (a.dueDate !== b.dueDate) return !a.dueDate ? 1 : !b.dueDate ? -1 : a.dueDate < b.dueDate ? -1 : 1;
+  if ((a.dueTime || "") !== (b.dueTime || "")) return !a.dueTime ? 1 : !b.dueTime ? -1 : a.dueTime < b.dueTime ? -1 : 1;
   return ms(b.createdAt) - ms(a.createdAt);
 }
 
@@ -604,7 +997,8 @@ function card(t) {
         <span class="pri pri-${t.priority || "med"}" title="${t.priority} priority"></span>
         ${t.project ? `<span class="chip">${esc(t.project)}</span>` : ""}
         ${t.status === "doing" ? `<span class="doing">In progress</span>` : ""}
-        ${t.dueDate && !done ? `<span class="${late ? "late" : ""}">${late ? "Overdue · " : ""}${fmtDue(t.dueDate)}</span>` : ""}
+        ${t.dueDate && !done ? `<span class="${late ? "late" : ""}">${late ? "Overdue · " : ""}${fmtDue(t.dueDate)}${t.dueTime ? ` · ${fmtTime(t.dueTime)}` : ""}</span>` : ""}
+        ${t.gcalEventId ? `<span title="In Google Calendar">📅</span>` : ""}
         ${done && t.completedAt ? `<span>Done ${fmtWhen(ms(t.completedAt))}</span>` : ""}
         ${logs ? `<span>· ${logs} log${logs > 1 ? "s" : ""}</span>` : ""}
       </div>
@@ -642,7 +1036,7 @@ const VIEWS = {
       const empty = nothing
         ? `<div class="empty" style="margin-top:${b.doneToday.length ? 0 : 4}px">${b.doneToday.length ? "All clear for today. Nice work. ✨" : "Nothing planned for today yet. Add a task above."}</div>`
         : "";
-      return stats + (nothing && b.doneToday.length ? empty + lists : lists + empty);
+      return stats + scheduleHtml() + (nothing && b.doneToday.length ? empty + lists : lists + empty);
     }
   },
 
@@ -783,6 +1177,12 @@ $("#nav").addEventListener("click", e => {
 $("#view").addEventListener("click", e => {
   const chip = e.target.closest("[data-filter]");
   if (chip) { state.filter = chip.dataset.filter; render(); return; }
+  const g = e.target.closest("[data-gcal]");
+  if (g) {
+    if (g.dataset.gcal === "connect") gcalConnect();
+    else gcalLoadToday(true);
+    return;
+  }
   const actEl = e.target.closest("[data-act]");
   if (!actEl) return;
   const li = actEl.closest("[data-id]");
@@ -801,7 +1201,9 @@ $("#view").addEventListener("submit", e => {
   e.preventDefault();
   const title = e.target.q.value.trim();
   if (!title) return;
-  createTask({ title, notes: "", project: "", dueDate: dayKey(), priority: "med", status: "todo", progress: 0 });
+  const data = { title, notes: "", project: "", dueDate: dayKey(), dueTime: null, priority: "med", status: "todo", progress: 0, gcal: gcal.connected && gcal.auto };
+  const id = createTask(data);
+  if (data.gcal) gcalSync({ ...data, id });
   e.target.q.value = "";
 });
 
@@ -812,25 +1214,31 @@ const taskRef = id => fb.doc(fb.db, "users", state.user.uid, "tasks", id);
 const fail = e => { console.error(e); toast("Couldn't save: " + (e.code || e.message)); };
 
 function createTask(data) {
-  const { addDoc, collection, serverTimestamp, db } = fb;
-  addDoc(collection(db, "users", state.user.uid, "tasks"), {
+  const { doc, setDoc, collection, serverTimestamp, db } = fb;
+  const ref = doc(collection(db, "users", state.user.uid, "tasks"));
+  setDoc(ref, {
     ...data,
     log: [],
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
     completedAt: data.status === "done" ? serverTimestamp() : null
   }).catch(fail);
+  return ref.id;
 }
 
 function toggleDone(t) {
   const { updateDoc, serverTimestamp } = fb;
+  let next;
   if (t.status === "done") {
     const back = t.progressBeforeDone || 0;
-    updateDoc(taskRef(t.id), { status: back > 0 ? "doing" : "todo", progress: back, completedAt: null, updatedAt: serverTimestamp() }).catch(fail);
+    next = { status: back > 0 ? "doing" : "todo", progress: back };
+    updateDoc(taskRef(t.id), { ...next, completedAt: null, updatedAt: serverTimestamp() }).catch(fail);
   } else {
-    updateDoc(taskRef(t.id), { status: "done", progressBeforeDone: t.progress || 0, progress: 100, completedAt: serverTimestamp(), updatedAt: serverTimestamp() }).catch(fail);
+    next = { status: "done", progress: 100 };
+    updateDoc(taskRef(t.id), { ...next, progressBeforeDone: t.progress || 0, completedAt: serverTimestamp(), updatedAt: serverTimestamp() }).catch(fail);
     toast("Task completed ✓");
   }
+  if (t.gcalEventId) gcalSync({ ...t, ...next }, true);
 }
 
 /* =========================================================
@@ -847,6 +1255,9 @@ function openSheet(task) {
   F["notes"].value = task?.notes || "";
   F["project"].value = task?.project || "";
   F["dueDate"].value = task ? (task.dueDate || "") : (state.view === "today" ? dayKey() : "");
+  F["dueTime"].value = task?.dueTime || "";
+  F["gcal"].checked = task ? !!(task.gcal || task.gcalEventId) : gcal.auto;
+  syncSheetGcal(task);
   F["priority"].value = task?.priority || "med";
   F["status"].value = task?.status || "todo";
   F["progress"].value = task?.progress ?? 0;
@@ -882,6 +1293,9 @@ F["progress"].addEventListener("input", () => {
   else if (F["status"].value === "done" || (p > 0 && F["status"].value === "todo")) F["status"].value = "doing";
 });
 
+F["dueDate"].addEventListener("input", updateGcalNote);
+F["gcal"].addEventListener("change", updateGcalNote);
+
 F["status"].addEventListener("change", () => {
   const s = F["status"].value, p = Number(F["progress"].value);
   if (s === "done") F["progress"].value = 100;
@@ -898,27 +1312,34 @@ form.addEventListener("submit", e => {
   if (progress === 100) status = "done";
   if (status === "done") progress = 100;
 
+  const dueDate = F["dueDate"].value || null;
   const data = {
     title,
     notes: F["notes"].value.trim(),
     project: F["project"].value.trim(),
-    dueDate: F["dueDate"].value || null,
+    dueDate,
+    dueTime: dueDate ? (F["dueTime"].value || null) : null,
     priority: F["priority"].value,
     status,
     progress
   };
+  if (gcal.connected) data.gcal = F["gcal"].checked;
 
   if (!state.editing) {
-    createTask(data);
+    if (!("gcal" in data)) data.gcal = false;
+    const id = createTask(data);
     toast("Task added");
+    if (data.gcal && data.dueDate) gcalSync({ ...data, id });
   } else {
-    const prev = state.tasks.find(t => t.id === state.editing);
+    const id = state.editing;
+    const prev = state.tasks.find(t => t.id === id);
     const { updateDoc, serverTimestamp } = fb;
     const upd = { ...data, updatedAt: serverTimestamp() };
     if (status === "done" && prev?.status !== "done") { upd.completedAt = serverTimestamp(); upd.progressBeforeDone = prev?.progress || 0; }
     if (status !== "done") upd.completedAt = null;
-    updateDoc(taskRef(state.editing), upd).catch(fail);
+    updateDoc(taskRef(id), upd).catch(fail);
     toast("Saved");
+    gcalSync({ ...prev, ...data, id });
   }
   closeSheet();
 });
@@ -938,6 +1359,7 @@ $("#logBtn").addEventListener("click", () => {
   if (status === "done" && t.status !== "done") { upd.completedAt = serverTimestamp(); upd.progressBeforeDone = t.progress || 0; }
   if (status !== "done") upd.completedAt = null;
   updateDoc(taskRef(t.id), upd).catch(fail);
+  if (t.gcalEventId && status !== t.status) gcalSync({ ...t, status, progress: p }, true);
   F["status"].value = status;
   $("#logText").value = "";
   toast("Progress logged");
@@ -945,6 +1367,7 @@ $("#logBtn").addEventListener("click", () => {
 
 $("#delBtn").addEventListener("click", () => {
   if (!state.editing || !confirm("Delete this task and its work log?")) return;
+  gcalRemove(state.tasks.find(t => t.id === state.editing));
   fb.deleteDoc(taskRef(state.editing)).catch(fail);
   closeSheet();
   toast("Task deleted");
@@ -965,7 +1388,11 @@ document.addEventListener("keydown", e => {
 
 // Refresh "today" boundaries when the app comes back to the foreground
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && state.user) { renderUser(); render(); }
+  if (!document.hidden && state.user) {
+    renderUser();
+    render();
+    if (gcal.connected && state.view === "today") gcalLoadToday(false);
+  }
 });
 
 boot();
