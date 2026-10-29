@@ -622,7 +622,7 @@ updateOnline();
 const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
 const gcal = {
   client: null, token: null, exp: 0, connected: false, auto: true,
-  events: null, day: null, status: "idle", err: "", waiters: []
+  events: null, day: null, status: "idle", err: "", waiters: [], reqAt: 0
 };
 let gisPromise = null;
 
@@ -695,9 +695,11 @@ function gcalClient() {
 function gcalToken(interactive = true) {
   if (gcal.token && Date.now() < gcal.exp) return Promise.resolve(gcal.token);
   if (!interactive) return Promise.reject(gcalErr("expired"));
+  if (gcal.waiters.length && Date.now() - gcal.reqAt > 60e3) gcalFlush(gcalErr("popup_closed"));
   return new Promise((res, rej) => {
     gcal.waiters.push({ res, rej });
     if (gcal.waiters.length > 1) return;
+    gcal.reqAt = Date.now();
     const go = () => {
       try {
         gcalClient().requestAccessToken({
@@ -785,40 +787,91 @@ function gcalEventBody(t) {
   return ev;
 }
 
-/* Create / update / remove the calendar event for one task. Returns true on success. */
-async function gcalSync(t, quiet = false) {
+/* Create / update / remove the calendar event for one task. Returns true on success.
+   Never opens a Google sign-in popup unless interactive = true. If the 1-hour
+   session has expired, the task is flagged and synced on the next Refresh. */
+async function gcalSync(t, quiet = false, interactive = false) {
   if (!gcal.connected) return false;
   const want = t.gcal && t.dueDate;
   if (!want && !t.gcalEventId) return false;
   try {
     if (!want) {
-      await gcalApi("DELETE", `/${enc(t.gcalEventId)}`).catch(e => { if (!gone(e)) throw e; });
-      fb.updateDoc(taskRef(t.id), { gcalEventId: null, gcalLink: null }).catch(fail);
+      await gcalApi("DELETE", `/${enc(t.gcalEventId)}`, null, interactive).catch(e => { if (!gone(e)) throw e; });
+      fb.updateDoc(taskRef(t.id), { gcalEventId: null, gcalLink: null, gcalDirty: false }).catch(fail);
       if (!quiet) toast("Removed from Google Calendar");
       return true;
     }
     const body = gcalEventBody(t);
     let ev = null;
     if (t.gcalEventId) {
-      ev = await gcalApi("PUT", `/${enc(t.gcalEventId)}`, body).catch(e => { if (!gone(e)) throw e; return null; });
+      ev = await gcalApi("PUT", `/${enc(t.gcalEventId)}`, body, interactive).catch(e => { if (!gone(e)) throw e; return null; });
     }
     const isNew = !ev;
-    if (!ev) ev = await gcalApi("POST", "", body);
-    if (ev.id !== t.gcalEventId || ev.htmlLink !== t.gcalLink) {
-      fb.updateDoc(taskRef(t.id), { gcalEventId: ev.id, gcalLink: ev.htmlLink || null }).catch(fail);
+    if (!ev) ev = await gcalApi("POST", "", body, interactive);
+    if (ev.id !== t.gcalEventId || ev.htmlLink !== t.gcalLink || t.gcalDirty) {
+      fb.updateDoc(taskRef(t.id), { gcalEventId: ev.id, gcalLink: ev.htmlLink || null, gcalDirty: false }).catch(fail);
     }
     if (isNew && !quiet) toast("Added to Google Calendar 📅");
     return true;
   } catch (e) {
+    if (e.type === "expired") {
+      if (!t.gcalDirty) fb.updateDoc(taskRef(t.id), { gcalDirty: true }).catch(() => {});
+      if (gcal.status !== "expired") { gcal.status = "expired"; render(); }
+      if (!quiet) toast("Saved. Calendar will update when you tap Refresh.");
+      return false;
+    }
     console.error(e);
     toast(gcalMsg(e));
     return false;
   }
 }
 
+/* Push every queued calendar change (made while the session was expired) */
+let gcalPendingRunning = false;
+async function gcalSyncPending() {
+  if (!gcal.connected || gcalPendingRunning || !(gcal.token && Date.now() < gcal.exp)) return;
+  gcalDeleteOrphans();
+  const t0 = dayKey();
+  const list = state.tasks.filter(t =>
+    t.gcalDirty
+    || (t.gcal && t.dueDate && !t.gcalEventId && t.status !== "done" && t.dueDate >= t0)
+    || (!t.gcal && t.gcalEventId));
+  if (!list.length) return;
+  gcalPendingRunning = true;
+  let n = 0;
+  for (const t of list) if (await gcalSync(t, true)) n++;
+  gcalPendingRunning = false;
+  if (n) toast(`Synced ${n} task${n === 1 ? "" : "s"} with Google Calendar 📅`);
+}
+
+const gcalOrphanKey = () => `dt_gcal_orphans_${state.user.uid}`;
+function gcalOrphans(list) {
+  try {
+    if (list) localStorage.setItem(gcalOrphanKey(), JSON.stringify(list));
+    return JSON.parse(localStorage.getItem(gcalOrphanKey()) || "[]");
+  } catch { return list || []; }
+}
+
 function gcalRemove(t) {
   if (!gcal.connected || !t?.gcalEventId) return;
-  gcalApi("DELETE", `/${enc(t.gcalEventId)}`).catch(e => { if (!gone(e)) { console.error(e); toast(gcalMsg(e)); } });
+  const id = t.gcalEventId;
+  gcalApi("DELETE", `/${enc(id)}`, null, false).catch(e => {
+    if (gone(e)) return;
+    if (e.type === "expired") { gcalOrphans([...gcalOrphans(), id]); return; }
+    console.error(e);
+    toast(gcalMsg(e));
+  });
+}
+
+async function gcalDeleteOrphans() {
+  const ids = gcalOrphans();
+  if (!ids.length) return;
+  const left = [];
+  for (const id of ids) {
+    try { await gcalApi("DELETE", `/${enc(id)}`, null, false); }
+    catch (e) { if (!gone(e)) left.push(id); }
+  }
+  gcalOrphans(left);
 }
 
 async function gcalLoadToday(interactive = false) {
@@ -838,8 +891,11 @@ async function gcalLoadToday(interactive = false) {
     gcal.day = day;
     gcal.status = "ok";
     gcal.err = "";
+    render();
+    gcalSyncPending();
+    return;
   } catch (e) {
-    console.error(e);
+    if (e.type !== "expired") console.error(e);
     gcal.status = e.type === "expired" ? "expired" : "error";
     gcal.err = gcalMsg(e);
   }
@@ -920,7 +976,13 @@ function scheduleHtml() {
     <button class="sec-btn" type="button" data-gcal="refresh">↻ Refresh</button></div>`;
 
   if (gcal.status === "loading") return head + `<div class="ev-note">Loading today's events…</div>`;
-  if (gcal.status === "expired") return head + `<div class="ev-note"><span>Calendar session expired.</span><button class="btn" type="button" data-gcal="refresh">Refresh</button></div>`;
+  if (gcal.status === "expired") {
+    const waiting = state.tasks.filter(t => t.gcalDirty).length;
+    const msg = waiting
+      ? `Google sign-in expired. ${waiting} task${waiting === 1 ? "" : "s"} waiting to sync.`
+      : "Google sign-in expired (it lasts 1 hour).";
+    return head + `<div class="ev-note"><span>${msg}</span><button class="btn" type="button" data-gcal="refresh">Refresh</button></div>`;
+  }
   if (gcal.status === "error") return head + `<div class="ev-note"><span>${esc(gcal.err)}</span><button class="btn" type="button" data-gcal="refresh">Retry</button></div>`;
   if (!evs.length) return head + `<div class="ev-note">No events on your calendar today.</div>`;
 
@@ -1353,12 +1415,15 @@ $("#view").addEventListener("input", e => {
 $("#view").addEventListener("submit", e => {
   if (e.target.id !== "quickAdd") return;
   e.preventDefault();
-  const title = e.target.q.value.trim();
-  if (!title) return;
+  const input = e.target.q;
+  const title = input.value.trim();
+  if (!title) { input.value = ""; openSheet(null); return; }
   const data = { title, notes: "", project: "", dueDate: dayKey(), dueTime: null, priority: "med", status: "todo", progress: 0, gcal: gcal.connected && gcal.auto };
   const id = createTask(data);
-  if (data.gcal) gcalSync({ ...data, id });
-  e.target.q.value = "";
+  toast("Added for today ✓");
+  if (data.gcal) gcalSync({ ...data, id }, true);
+  input.value = "";
+  input.blur();
 });
 
 /* =========================================================
